@@ -7,6 +7,8 @@ services:
     healthCheckPath: /health
 
     envVars:
+      - key: DATA_DIR
+        value: data
       - key: PAPER_TRADING
         value: "true"
       - key: SKIP_STARTUP_TESTS
