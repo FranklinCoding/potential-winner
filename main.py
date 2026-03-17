@@ -68,20 +68,24 @@ def _run_tests() -> bool:
 
 
 def _scan_for_hardcoded_secrets():
-    """Scan all .py files for potential secrets."""
+    """Scan only bot source files for potential hardcoded secrets."""
     import re
     secret_pattern = re.compile(
         r'(api[_-]?key|secret|passphrase|private[_-]?key|password)\s*=\s*["\'][^"\']{6,}["\']',
         re.IGNORECASE,
     )
+    root = Path(__file__).parent
+    # Only scan our own source directories, never site-packages or venv
+    scan_dirs = ["dashboard", "executor", "logger", "model", "position_manager", "scanner", "tests"]
+    py_files = [root / "main.py"]
+    for d in scan_dirs:
+        py_files.extend((root / d).rglob("*.py"))
+
     issues = []
-    for py_file in Path(__file__).parent.rglob("*.py"):
-        if ".pytest_cache" in str(py_file):
-            continue
+    for py_file in py_files:
         try:
             content = py_file.read_text(encoding="utf-8", errors="ignore")
             for match in secret_pattern.finditer(content):
-                # Ignore placeholder/env/test patterns
                 val = match.group(0)
                 if any(x in val.lower() for x in ["your_", "placeholder", "os.getenv", "os.environ", "env.", "test_", "example"]):
                     continue
