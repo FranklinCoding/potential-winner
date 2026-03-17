@@ -66,8 +66,8 @@ class EdgeDetector:
         model: FairValueModel,
         elo_system: ELOSystem,
         min_edge: float = 0.08,
-        min_liquidity: float = 500.0,
-        max_spread: float = 0.05,
+        min_liquidity: float = 100.0,
+        max_spread: float = 0.20,
     ):
         self.model = model
         self.elo = elo_system
@@ -163,11 +163,14 @@ class EdgeDetector:
         sent_direction = "YES" if sentiment_score >= 0 else "NO"
         sentiment_agrees = (sentiment_score == 0.0) or (sent_direction == side)
 
-        # Gate 3: Model edge should not strongly disagree — but only enforce when
-        # ELO edge is modest. For large ELO signals (>20%), trust ELO.
-        if model_edge < -0.05 and raw_elo_edge < 0.20:
-            logger.debug(f"Model contradicts ELO on {market.market_id[:8]} — skipping")
-            return None
+        # Gate 3: Model edge should not strongly disagree — disabled until the
+        # model has accumulated enough real resolved-market training data.
+        # Re-enable by setting ENFORCE_MODEL_GATE=true in env.
+        import os
+        if os.getenv("ENFORCE_MODEL_GATE", "false").lower() == "true":
+            if model_edge < -0.05 and raw_elo_edge < 0.20:
+                logger.debug(f"Model contradicts ELO on {market.market_id[:8]} — skipping")
+                return None
 
         # Blended final edge: ELO is primary (70%), model secondary (30%)
         final_edge = 0.70 * raw_elo_edge + 0.30 * max(model_edge, 0.0)

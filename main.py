@@ -95,6 +95,67 @@ def _scan_for_hardcoded_secrets():
     return len(issues) == 0
 
 
+def _seed_paper_trades(markets, trade_logger, n: int, logger):
+    """Place n random paper trades across top markets to seed the system."""
+    import random
+    eligible = [m for m in markets if 0.02 < m.yes_price < 0.98 and m.liquidity > 50]
+    selected = random.sample(eligible, min(n, len(eligible)))
+    count = 0
+    for market in selected:
+        side = random.choice(["YES", "NO"])
+        price = market.yes_price if side == "YES" else market.no_price
+        if price <= 0 or price >= 1:
+            continue
+        trade_logger.log_trade(
+            market_id=market.market_id,
+            market_question=market.question,
+            category=market.category,
+            side=side,
+            entry_price=price,
+            size=10.0,
+            fair_value=0.5,
+            edge_at_entry=0.0,
+            elo_diff=0.0,
+            sentiment_score=0.0,
+            is_paper=True,
+            status="open",
+            slippage=0.0,
+        )
+        count += 1
+    logger.info(f"Seeded {count} random paper trades across {len(selected)} markets.")
+    return count
+
+
+def _ingest_historical_snapshots(snapshot_store, logger):
+    """Pull recent price history from Polymarket Gamma API to pre-populate snapshots."""
+    import requests as req
+    try:
+        resp = req.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"active": "true", "closed": "false", "limit": 100,
+                    "order": "volume24hr", "ascending": "false"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        markets_data = resp.json()
+        if isinstance(markets_data, dict):
+            markets_data = markets_data.get("markets", [])
+
+        from scanner.market_scanner import Market
+        count = 0
+        for item in markets_data:
+            try:
+                m = Market(item)
+                if m.active and not m.closed:
+                    snapshot_store.save_snapshots([m])
+                    count += 1
+            except Exception:
+                pass
+        logger.info(f"Ingested {count} historical market snapshots from Gamma API.")
+    except Exception as e:
+        logger.warning(f"Historical ingestion failed: {e}")
+
+
 def main():
     _requested = os.getenv("DATA_DIR", "data")
     try:
@@ -215,6 +276,18 @@ def main():
     model.ensure_ready(trade_logger=trade_logger, snapshot_store=snapshot_store)
     dashboard.set_model_info(model._last_mae, model._last_n_samples)
     log_model("Model ready", mae=model._last_mae, n=model._last_n_samples)
+
+    # ── Ingest historical snapshots on startup ─────────────────────────────────
+    logger.info("Ingesting historical market snapshots...")
+    _ingest_historical_snapshots(snapshot_store, logger)
+
+    # ── Seed random paper trades if requested ──────────────────────────────────
+    seed_n = int(os.getenv("SEED_TRADES", "0"))
+    if seed_n > 0 and trade_logger.get_stats(paper=True)["total_trades"] == 0:
+        logger.info(f"Seeding {seed_n} random paper trades...")
+        seed_markets = scanner.fetch_markets(limit=200)
+        if seed_markets:
+            _seed_paper_trades(seed_markets, trade_logger, seed_n, logger)
 
     # ── Web dashboard thread ───────────────────────────────────────────────────
     web_app = create_app(trade_logger, elo_system=elo_system, paper_trading=effective_paper)
