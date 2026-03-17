@@ -8,12 +8,12 @@ services:
 
     disk:
       name: bot-data
-      mountPath: /data
+      mountPath: /var/data
       sizeGB: 1
 
     envVars:
       - key: DATA_DIR
-        value: /data
+        value: /var/data
       - key: PAPER_TRADING
         value: "true"
       - key: SKIP_STARTUP_TESTS
