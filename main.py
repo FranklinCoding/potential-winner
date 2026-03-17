@@ -16,7 +16,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path("/etc/secrets/.env"))          # Render secret file location
+load_dotenv(Path(__file__).parent / ".env")    # local fallback
 
 # ── Safety check: PAPER_TRADING default ───────────────────────────────────────
 # Hardcoded fallback regardless of env
