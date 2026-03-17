@@ -95,8 +95,14 @@ def _scan_for_hardcoded_secrets():
 
 
 def main():
-    data_dir = os.getenv("DATA_DIR", "data")
-    os.makedirs(f"{data_dir}/logs", exist_ok=True)
+    _requested = os.getenv("DATA_DIR", "data")
+    try:
+        os.makedirs(f"{_requested}/logs", exist_ok=True)
+        data_dir = _requested
+    except PermissionError:
+        data_dir = "data"
+        print(f"WARNING: DATA_DIR={_requested!r} is not writable — falling back to local 'data/' directory.")
+        os.makedirs(f"{data_dir}/logs", exist_ok=True)
 
     # ── Logging ────────────────────────────────────────────────────────────────
     from logger.log_setup import setup_logging
