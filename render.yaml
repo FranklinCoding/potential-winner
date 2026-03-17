@@ -6,14 +6,7 @@ services:
     startCommand: python main.py
     healthCheckPath: /health
 
-    disk:
-      name: bot-data
-      mountPath: /data
-      sizeGB: 1
-
     envVars:
-      - key: DATA_DIR
-        value: /data
       - key: PAPER_TRADING
         value: "true"
       - key: SKIP_STARTUP_TESTS
