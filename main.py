@@ -136,7 +136,7 @@ def _ingest_historical_snapshots(snapshot_store, logger):
 
     total = 0
     offset = 0
-    limit = 500
+    limit = 25000
     empty_pages = 0
 
     logger.info("Starting full historical market ingestion (all pages)...")
@@ -146,7 +146,7 @@ def _ingest_historical_snapshots(snapshot_store, logger):
                 "https://gamma-api.polymarket.com/markets",
                 params={"limit": limit, "offset": offset,
                         "order": "volume24hr", "ascending": "false"},
-                timeout=30,
+                timeout=60,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -176,11 +176,13 @@ def _ingest_historical_snapshots(snapshot_store, logger):
                 break  # last page
 
             offset += limit
-            time.sleep(0.3)  # be polite to the API
+            time.sleep(0.3)
 
         except Exception as e:
-            logger.warning(f"Ingestion error at offset {offset}: {e}")
-            break
+            logger.warning(f"Ingestion error at offset {offset} with limit {limit}: {e} — retrying with limit=1000")
+            limit = 1000
+            time.sleep(1.0)
+            continue
 
     logger.info(f"Historical ingestion complete — {total} total market snapshots stored.")
 
