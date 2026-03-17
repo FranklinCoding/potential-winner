@@ -6,16 +6,7 @@ services:
     startCommand: python main.py
     healthCheckPath: /health
 
-    # Persistent disk: survives deploys so SQLite DBs, ELO state, and the
-    # trained XGBoost model are not wiped every time you redeploy.
-    disk:
-      name: bot-data
-      mountPath: /data
-      sizeGB: 1
-
     envVars:
-      - key: DATA_DIR
-        value: /data
       - key: PAPER_TRADING
         value: "true"
       - key: SKIP_STARTUP_TESTS
