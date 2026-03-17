@@ -127,33 +127,62 @@ def _seed_paper_trades(markets, trade_logger, n: int, logger):
 
 
 def _ingest_historical_snapshots(snapshot_store, logger):
-    """Pull recent price history from Polymarket Gamma API to pre-populate snapshots."""
+    """Paginate through ALL Polymarket markets and store snapshots."""
     import requests as req
-    try:
-        resp = req.get(
-            "https://gamma-api.polymarket.com/markets",
-            params={"active": "true", "closed": "false", "limit": 100,
-                    "order": "volume24hr", "ascending": "false"},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        markets_data = resp.json()
-        if isinstance(markets_data, dict):
-            markets_data = markets_data.get("markets", [])
+    from scanner.market_scanner import Market
 
-        from scanner.market_scanner import Market
-        count = 0
-        for item in markets_data:
-            try:
-                m = Market(item)
-                if m.active and not m.closed:
-                    snapshot_store.save_snapshots([m])
-                    count += 1
-            except Exception:
-                pass
-        logger.info(f"Ingested {count} historical market snapshots from Gamma API.")
-    except Exception as e:
-        logger.warning(f"Historical ingestion failed: {e}")
+    session = req.Session()
+    session.headers.update({"User-Agent": "polymarket-bot/2.0", "Accept": "application/json"})
+
+    total = 0
+    offset = 0
+    limit = 500
+    empty_pages = 0
+
+    logger.info("Starting full historical market ingestion (all pages)...")
+    while True:
+        try:
+            resp = session.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"limit": limit, "offset": offset,
+                        "order": "volume24hr", "ascending": "false"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            markets_data = data if isinstance(data, list) else data.get("markets", [])
+
+            if not markets_data:
+                empty_pages += 1
+                if empty_pages >= 2:
+                    break
+                offset += limit
+                continue
+
+            batch = []
+            for item in markets_data:
+                try:
+                    m = Market(item)
+                    batch.append(m)
+                except Exception:
+                    pass
+
+            if batch:
+                snapshot_store.save_snapshots(batch)
+                total += len(batch)
+                logger.info(f"Ingested {total} snapshots so far (offset={offset})...")
+
+            if len(markets_data) < limit:
+                break  # last page
+
+            offset += limit
+            time.sleep(0.3)  # be polite to the API
+
+        except Exception as e:
+            logger.warning(f"Ingestion error at offset {offset}: {e}")
+            break
+
+    logger.info(f"Historical ingestion complete — {total} total market snapshots stored.")
 
 
 def main():
