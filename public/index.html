@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NYC Transit Nav</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header>
+        <h1>🚇 NYC Transit Nav</h1>
+        <p class="subtitle">Directions + live subway arrivals</p>
+      </header>
+
+      <section id="directions-panel">
+        <h2>Directions</h2>
+        <label for="origin-input">From</label>
+        <input id="origin-input" type="text" placeholder="Current location or address" />
+
+        <label for="destination-input">To</label>
+        <input id="destination-input" type="text" placeholder="Where to?" />
+
+        <label class="checkbox-row">
+          <input id="subway-only" type="checkbox" checked />
+          Prefer subway
+        </label>
+
+        <button id="get-directions-btn" type="button">Get Directions</button>
+        <div id="directions-status" class="status-text"></div>
+        <div id="directions-results"></div>
+      </section>
+
+      <section id="nearby-panel">
+        <div class="nearby-header">
+          <h2>Nearby Stations</h2>
+          <button id="refresh-nearby-btn" type="button" title="Refresh">⟳</button>
+        </div>
+        <div id="nearby-status" class="status-text"></div>
+        <div id="nearby-list"></div>
+      </section>
+    </aside>
+
+    <main id="map-container">
+      <div id="map"></div>
+      <div id="station-panel" class="hidden">
+        <button id="close-station-panel" type="button" class="close-btn">×</button>
+        <h3 id="station-panel-name"></h3>
+        <div id="station-panel-lines"></div>
+        <div id="station-panel-arrivals"></div>
+        <div class="walkshed-controls">
+          <label for="walk-minutes">Walking radius</label>
+          <select id="walk-minutes">
+            <option value="5">5 min</option>
+            <option value="10" selected>10 min</option>
+            <option value="15">15 min</option>
+            <option value="20">20 min</option>
+          </select>
+          <button id="show-walkshed-btn" type="button">Show on map</button>
+          <button id="clear-walkshed-btn" type="button">Clear</button>
+        </div>
+      </div>
+      <div id="config-error" class="hidden"></div>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

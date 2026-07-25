@@ -1,406 +1,110 @@
-# Polymarket Trading Bot v2
+# NYC Transit Nav
 
-An autonomous Python trading bot for [Polymarket](https://polymarket.com) prediction markets.
-Scans markets every ~7 seconds, estimates fair value using an ELO-powered XGBoost model,
-detects mispriced edges, and executes paper or live trades.
+A local web app for getting around New York City: turn-by-turn transit
+directions (Google Maps) plus live NYC subway arrival countdowns (MTA
+real-time feeds), with an optional "walking radius" overlay around any
+station powered by Google's Isochrones API.
 
-**Default mode: PAPER TRADING** — your real wallet is never touched until you explicitly
-set `PAPER_TRADING=false` and type `CONFIRM` at the startup prompt.
+## Features
 
----
+- **Map of every NYC subway station**, color-coded by line, centered on your
+  location (or NYC generally if you don't share it).
+- **Directions** between any two points, biased toward subway routes, with
+  step-by-step instructions (walk → board line X → N stops → walk) and the
+  route drawn on the map. Powered by the Google Directions API (transit mode).
+- **Live arrivals**: click any station to see real train countdowns in both
+  directions, refreshed every 20 seconds, decoded straight from MTA's
+  GTFS-realtime feeds (no MTA API key required).
+- **Nearby stations panel** that updates as you pan the map.
+- **Walking radius (isochrone)**: from a station's detail panel, draw the
+  area reachable on foot in 5–20 minutes, using Google's Isochrones API.
 
-## Architecture
+## Prerequisites
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│                        main.py                                 │
-│  Orchestrates all threads + main trading loop                  │
-└───────────────────────────┬────────────────────────────────────┘
-                            │
-       ┌────────────────────┼──────────────────────┐
-       │                    │                      │
-       ▼                    ▼                      ▼
-┌─────────────┐    ┌────────────────┐    ┌─────────────────────┐
-│   Scanner   │    │   ELO System   │    │  Position Manager   │
-│  (Gamma API)│    │  model/elo.py  │    │  (30s cycle thread) │
-│  7s polling │    │  3 dimensions: │    │  trailing stop,     │
-│  snapshots  │    │  category/     │    │  profit target,     │
-│  → SQLite   │    │  event_type/   │    │  daily drawdown     │
-└──────┬──────┘    │  time_of_day   │    └─────────────────────┘
-       │           └────────┬───────┘
-       ▼                    ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Feature Engineering                        │
-│  20 features including ELO-implied probability,             │
-│  ELO edge (PRIMARY signal), rolling volume windows,         │
-│  sentiment score/momentum, whale activity flag              │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│              XGBoost Fair Value Model                        │
-│  Predicts true YES probability                               │
-│  Auto-retrains every 24h on resolved markets                 │
-│  Logs feature importance after each retrain                  │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Edge Detector                              │
-│  Gate 1: ELO edge > MIN_EDGE_PCT (8%)                        │
-│  Gate 2: Sentiment direction agrees                          │
-│  Gate 3: Model does not strongly contradict ELO             │
-│  Output: EdgeSignal ranked by CONFIDENCE, not just size      │
-│  Kelly Criterion position sizing                             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                Trade Executor                                │
-│  Paper: simulates slippage 0.1–0.3%, order book impact      │
-│  Live: py-clob-client CLOB orders (requires CONFIRM prompt)  │
-│  PAPER_TRADING guard before every real order                 │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│                  Trade Logger (SQLite)                        │
-│  Separate tables: paper vs live (NEVER mixed)                │
-│  Records: entry/exit, P&L, hold time, ELO diff, sentiment,  │
-│  exit reason, Sharpe, Sortino, daily P&L tracking            │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-                 ┌─────────┴──────────┐
-                 ▼                    ▼
-         ┌──────────────┐    ┌──────────────────┐
-         │ CLI Dashboard│    │  Web Dashboard   │
-         │   (Rich)     │    │  FastAPI :8000   │
-         │  5s refresh  │    │  5s auto-refresh │
-         └──────────────┘    └──────────────────┘
-```
+- Node.js 18+ (uses the built-in `fetch`)
+- A Google Cloud project with billing enabled and a Google Maps Platform API
+  key
 
----
+## 1. Get a Google Maps Platform API key
 
-## The ELO System (Primary Edge Signal)
+Google's setup guide: <https://developers.google.com/maps/documentation/isochrones/get-api-key>
 
-**This is the core of the strategy**, inspired by tennis prediction research where
-ELO momentum outperformed raw win rates as the most predictive feature.
+1. Create (or pick) a project in the [Google Cloud Console](https://console.cloud.google.com/).
+2. Enable these APIs for the project:
+   - **Maps JavaScript API** (renders the map in the browser)
+   - **Places API** (address autocomplete)
+   - **Directions API** (transit routing)
+   - **Isochrones API** (walking-radius overlay — this is the API from the
+     link above; it may need to be requested/enabled separately as it's a
+     newer Google Maps Platform product)
+3. Create an API key under **APIs & Services → Credentials**.
+4. (Recommended) Create **two** keys so each is scoped as narrowly as
+   possible:
+   - A **browser key** restricted by HTTP referrer (e.g.
+     `http://localhost:3000/*`), used for the map + autocomplete.
+   - A **server key** restricted by IP (or left unrestricted, since it never
+     reaches the browser), used for Directions/Isochrones calls from the
+     Node server.
 
-### How it works
+   One key with no restrictions also works for local testing — just set
+   `GOOGLE_MAPS_API_KEY` and skip the other two.
 
-Three separate ELO rating dimensions, each starting at 1500:
+## 2. Configure and run
 
-| Dimension | Keys | Weight in blended probability |
-|-----------|------|-------------------------------|
-| `category` | politics, crypto, sports, economics… | 60% |
-| `event_type` | election, fed_decision, earnings… | 30% |
-| `time_of_day` | morning, afternoon, evening, overnight | 10% |
-
-**ELO updates after every market resolution:**
-- YES resolution → ELO goes **up**
-- NO resolution → ELO goes **down**
-- Volume-weighted: $1M market swing = 3× the ELO delta of a $1k market
-
-**Converting ELO to probability:**
-```
-P(YES) = 1 / (1 + 10^((1500 - rating) / 400))
-```
-
-**The primary edge signal:**
-```
-elo_edge = elo_implied_probability - current_market_price
-```
-
-If `elo_edge > 8%` (configurable), the market is considered mispriced and a trade is flagged.
-
-### Why ELO > raw stats
-
-Raw yes/no rates are noisy and don't adjust for recency or volume.
-The ELO system naturally weights recent high-volume resolutions more,
-giving the model a "momentum signal" that is forward-looking rather than
-just a historical average.
-
----
-
-## XGBoost Model
-
-The model predicts the true probability of YES resolution using **20 engineered features**:
-
-| # | Feature | Why it matters |
-|---|---------|----------------|
-| 1 | `market_age_hours` | Older markets are better calibrated |
-| 2 | `time_to_resolution_hours` | More time = more uncertainty |
-| 3 | `current_price` | Raw market signal |
-| 4 | `volume_1h` | Short-term interest |
-| 5 | `volume_6h` | Medium-term trend |
-| 6 | `volume_24h` | Main volume metric |
-| 7 | `volume_7d` | Weekly context |
-| 8 | `volume_acceleration` | d(volume)/dt — momentum |
-| 9 | `price_velocity` | d(price)/dt — directional momentum |
-| 10 | `category_elo` | ELO of the market's topic |
-| 11 | `event_type_elo` | ELO of the event type |
-| 12 | `elo_implied_probability` | Blended ELO → probability |
-| **13** | **`elo_edge`** | **THE primary signal: elo_prob - price** |
-| 14 | `liquidity_depth` | Thin markets = harder to trade |
-| 15 | `bid_ask_spread` | Tight spread = efficient = harder edge |
-| 16 | `age_ratio` | age / (age + time_to_resolution) |
-| 17 | `sentiment_score` | NewsAPI headline sentiment |
-| 18 | `sentiment_momentum` | Direction of sentiment change |
-| 19 | `hour_of_day` | Temporal pattern |
-| 20 | `whale_activity_flag` | Large order detected in last hour |
-
-**Auto-retraining:** Every 24 hours, the model retrains using:
-1. All resolved markets stored in `data/snapshots.db`
-2. Synthetic data to pad the training set early on
-
-Feature importance is logged after every retraining event to `data/logs/model.log`.
-
----
-
-## Quickstart
-
-### 1. Clone and install
 ```bash
-cd polymarket-bot
-pip install -r requirements.txt
-```
-
-### 2. Add API keys (optional for paper trading)
-```bash
+npm install
 cp .env.example .env
-# Edit .env — all fields are optional for paper trading
+# edit .env and paste in your key(s)
+npm start
 ```
 
-### 3. Run in paper mode (safe — default)
-```bash
-python main.py
-```
+Then open <http://localhost:3000>.
 
-The bot will:
-1. Run the test suite (91 tests) — **refuses to start if any fail**
-2. Scan for hardcoded secrets
-3. Train the XGBoost model on synthetic data (~5 seconds)
-4. Start the web dashboard at `http://localhost:8000`
-5. Begin scanning Polymarket every ~7 seconds
-6. Display the Rich terminal dashboard
+## How it works
 
----
+- `server/index.js` — Express app serving the static frontend and JSON API.
+- `server/routes/*` — `/api/config`, `/api/stations`, `/api/arrivals/:id`,
+  `/api/directions`, `/api/isochrone`.
+- `server/lib/stationsStore.js` — fetches MTA's public
+  [`Stations.csv`](http://web.mta.info/developers/data/nyct/subway/Stations.csv)
+  (station names, lines, coordinates, GTFS stop IDs), caches it to
+  `data/stations.cache.json` so the app still works if that endpoint is
+  briefly unavailable, and refreshes it in the background daily.
+- `server/lib/gtfsRealtime.js` — fetches and decodes MTA's GTFS-realtime
+  protobuf feeds (one per line group, e.g. `gtfs-ace`, `gtfs-nqrw`) with the
+  `gtfs-realtime-bindings` package, and extracts next-arrival times for a
+  given station's GTFS stop ID. MTA's real-time feeds have not required an
+  API key since 2019.
+- `server/lib/googleMaps.js` — thin server-side proxy to Google's Directions
+  and Isochrones REST APIs, so your server key never reaches the browser.
+- `public/` — plain HTML/CSS/JS frontend (no build step) using the Google
+  Maps JavaScript API, Places Autocomplete, and `fetch()` against the routes
+  above.
 
-## How to Add API Keys
+## Known limitations
 
-Edit `.env`:
+- The Isochrones API is a newer/preview Google Maps Platform product; its
+  exact JSON response shape wasn't verified against a live key while
+  building this (network access was restricted in the build environment).
+  `extractIsochronePolygons()` in `public/app.js` parses a couple of
+  plausible shapes defensively — if walking-radius polygons don't render for
+  you, check your browser console / server logs for the raw response and
+  adjust that function to match.
+- Arrivals are matched by a station's single GTFS stop ID; large transfer
+  complexes with multiple platform IDs (e.g. Times Sq–42 St) currently only
+  show trains for the specific platform whose ID matches, not every line
+  passing through the complex.
+- No offline/PWA support — this is meant to be run locally with
+  `npm start` while you have internet access.
 
-```env
-# For paper trading — only NEWS_API_KEY matters (optional)
-NEWS_API_KEY=your_newsapi_key_from_newsapi.org
+## Troubleshooting
 
-# For LIVE trading — fill all four:
-POLYMARKET_API_KEY=your_key
-POLYMARKET_API_SECRET=your_secret
-POLYMARKET_PASSPHRASE=your_passphrase
-WALLET_PRIVATE_KEY=your_polygon_wallet_private_key
-PAPER_TRADING=false
-```
-
-Get Polymarket CLOB credentials from your account at polymarket.com.
-Get a free NewsAPI key at newsapi.org (optional — improves sentiment).
-
----
-
-## Enabling Live Trading
-
-> **Warning**: Start with very small `MAX_POSITION_SIZE` (e.g., `5` USDC) to verify
-> everything works before scaling up.
-
-1. Fill in all four wallet fields in `.env`
-2. Set `PAPER_TRADING=false`
-3. Run `python main.py`
-4. Type `CONFIRM` at the prompt
-
-The bot implements multiple safety layers:
-- Missing `WALLET_PRIVATE_KEY` → forces paper trading regardless of flag
-- `PAPER_TRADING` guard asserted before every real CLOB order
-- Daily drawdown halt: stops trading if today's P&L drops below `MAX_DAILY_DRAWDOWN_PCT`
-- Maximum position: `min(kelly_size, MAX_POSITION_PCT * bankroll, MAX_POSITION_SIZE)`
-
----
-
-## How to Backtest
-
-The bot accumulates real market snapshots in `data/snapshots.db` as it runs.
-Once you have resolved markets stored:
-
-```python
-from scanner.market_scanner import SnapshotStore
-from model.fair_value_model import FairValueModel
-from model.elo import ELOSystem
-
-store = SnapshotStore("data/snapshots.db")
-elo = ELOSystem()
-model = FairValueModel(elo_system=elo)
-
-# Retrain on real data
-model.retrain_from_resolved(store)
-
-# Inspect resolved markets
-resolved = store.get_resolved_for_training()
-print(f"{len(resolved)} resolved markets available")
-```
-
-For deeper backtesting, export the snapshots table to a DataFrame and replay
-the edge detector logic with different `min_edge` thresholds.
-
----
-
-## Dashboard Guide
-
-### Terminal Dashboard (CLI)
-Refreshes every 5 seconds. Columns:
-
-| Section | What to look at |
-|---------|-----------------|
-| **Performance** | Win Rate (50) = last 50 trades — more reliable than all-time |
-| **Top Category ELOs** | Categories above 1500 = historically YES-biased |
-| **Top Edges** | `ELO d` = raw ELO signal; `Edge` = blended with model; `Conf` = combined score |
-| **Open Positions** | `ELO d` column shows the edge that triggered the trade |
-
-### Web Dashboard (`http://localhost:8000`)
-- **Edges tab**: All current signals with Kelly fraction
-- **Positions tab**: Open trades
-- **Trades tab**: Paginated history with hold time and exit reason
-- **ELO tab**: Full ELO rating table, all categories
-
----
-
-## Performance Expectations & Limitations
-
-**Realistic expectations:**
-- This bot operates on a semi-efficient market. Detectable edges are rare (typically 2–8 per scan).
-- Most edges come from newly opened markets before liquidity stabilizes.
-- ELO cold start: ratings start at 1500 (neutral). The signal gets stronger after ~50+ resolved markets.
-- Slippage (0.1–0.3%) and CLOB fees eat into edge. Only trade edges > 8% to stay profitable.
-
-**Limitations:**
-- The XGBoost model is initially trained on synthetic data. Accuracy improves as real resolved markets accumulate in `data/snapshots.db`.
-- Sentiment analysis without a NewsAPI key relies on question-text lexicon only.
-- Polymarket restricts access from certain jurisdictions. Check Terms of Service before use.
-- This is not financial advice. Past performance of prediction market bots does not guarantee future results.
-
----
-
-## Running Tests
-
-```bash
-pytest tests/ -v
-```
-
-91 tests covering: ELO calculator (19), trade logger (13), market scanner (12),
-fair value model (10), edge detector (5), Kelly criterion (5), sentiment (9),
-position manager (9), executor (8), and 2 integration tests.
-
-The bot **refuses to start** if any test fails.
-
----
-
-## REST API Reference
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /` | Web dashboard |
-| `GET /health` | Heartbeat, uptime, paper/live mode |
-| `GET /stats` | Win rate, P&L, Sharpe, Sortino, model MAE |
-| `GET /positions` | Open positions |
-| `GET /trades?limit=N&offset=N` | Paginated trade history |
-| `GET /edges` | Current top edges with all signal components |
-| `GET /elo` | Full ELO table (category, event_type, time_bucket) |
-
----
-
-## .env Variable Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PAPER_TRADING` | `true` | **Master safety switch.** Set `false` for live trading |
-| `WALLET_PRIVATE_KEY` | `` | Polygon wallet private key — missing = forced paper mode |
-| `POLYMARKET_API_KEY` | `` | CLOB API key (live only) |
-| `POLYMARKET_API_SECRET` | `` | CLOB API secret (live only) |
-| `POLYMARKET_PASSPHRASE` | `` | CLOB passphrase (live only) |
-| `NEWS_API_KEY` | `` | NewsAPI key for headline sentiment (optional) |
-| `MIN_EDGE_PCT` | `0.08` | Minimum ELO edge to flag a trade (8%) |
-| `MAX_POSITION_SIZE` | `100` | Max USDC per trade (absolute cap) |
-| `MAX_POSITION_PCT` | `0.05` | Max % of bankroll per trade (Kelly cap) |
-| `BANKROLL` | `1000` | Your starting bankroll for Kelly sizing |
-| `PROFIT_TARGET` | `0.15` | Exit when position gains 15% |
-| `STOP_LOSS` | `0.10` | Trailing stop: exit when down 10% from peak |
-| `MAX_DAILY_DRAWDOWN_PCT` | `0.05` | Halt trading if today's P&L < -5% of bankroll |
-| `WEBHOOK_URL` | `` | Slack/Discord webhook for large edge alerts |
-| `DASHBOARD_PORT` | `8000` | Web dashboard port |
-| `POLL_INTERVAL` | `7` | Seconds between market scans |
-| `LOG_LEVEL` | `INFO` | Logging verbosity (DEBUG/INFO/WARNING/ERROR) |
-
----
-
-## Log Files
-
-All logs in `data/logs/`, rotated daily, 30-day retention:
-
-| File | Contents |
-|------|----------|
-| `bot.log` | All bot activity |
-| `errors.log` | Errors only |
-| `trades.log` | Trade open/close events |
-| `edges.log` | Every detected edge signal |
-| `model.log` | Model training events + feature importance |
-
----
-
-## Project Structure
-
-```
-polymarket-bot/
-├── .env                          Your config (never commit)
-├── .env.example                  Template
-├── requirements.txt
-├── main.py                       Orchestrator
-├── secret_scan.py                Runs at startup — checks for hardcoded secrets
-│
-├── scanner/
-│   └── market_scanner.py         Gamma API polling + SnapshotStore (SQLite)
-│
-├── model/
-│   ├── elo.py                    ELO system (PRIMARY signal) — 3 dimensions
-│   ├── fair_value_model.py       XGBoost 20-feature model + auto-retrain
-│   ├── edge_detector.py          3-gate signal detection + Kelly sizing
-│   ├── sentiment.py              NewsAPI + lexicon sentiment + momentum
-│   └── momentum.py               Legacy wrapper (delegates to ELOSystem)
-│
-├── executor/
-│   └── trade_executor.py         Paper (slippage sim) + live CLOB orders
-│
-├── position_manager/
-│   └── position_manager.py       Trailing stop, profit target, drawdown halt
-│
-├── logger/
-│   ├── trade_logger.py           SQLAlchemy trades DB (paper/live separate)
-│   └── log_setup.py              Rotating file handlers, 4 log channels
-│
-├── dashboard/
-│   ├── cli_dashboard.py          Rich terminal dashboard
-│   └── web_dashboard.py          FastAPI web UI
-│
-├── tests/                        91 tests — bot refuses to start if any fail
-│   ├── test_elo.py               19 ELO system tests
-│   ├── test_logger.py            13 trade logger tests
-│   ├── test_scanner.py           12 scanner + snapshot tests
-│   ├── test_model.py             24 model + edge + sentiment + Kelly tests
-│   ├── test_executor.py          8 executor + slippage tests
-│   ├── test_position_manager.py  9 position management tests
-│   └── test_integration.py       2 full end-to-end cycle tests
-│
-└── data/                         Auto-created at runtime
-    ├── trades.db                 SQLite trade log
-    ├── snapshots.db              Market price history (grows over time)
-    ├── elo_state.json            Persisted ELO ratings
-    ├── fair_value_model.pkl      Trained XGBoost model
-    └── logs/                     Rotating daily log files
-```
+- **Map doesn't load / blank screen**: check the browser console. Usually a
+  missing/invalid `GOOGLE_MAPS_BROWSER_KEY`, a referrer restriction that
+  doesn't match `http://localhost:3000`, or an API not enabled in Cloud
+  Console.
+- **"No upcoming trains reported"**: MTA feeds occasionally have gaps for a
+  given line/time — try again in a few seconds, or check
+  [MTA's service status](https://www.mta.info/status).
+- **Directions fail server-side**: check the server logs; the error message
+  from `/api/directions` passes through Google's own `status`/`error_message`.

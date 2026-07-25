@@ -1,32 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Environment
+node_modules/
 .env
-.env.local
-.env.*.local
-
-# Virtual environments
-venv/
-.venv/
-env/
-
-# Data / generated at runtime (use Render's persistent disk instead)
-data/
-
-# IDE / OS
-.vscode/
-.idea/
-*.DS_Store
-Thumbs.db
-
-# Claude memory
-.claude/
+data/stations.cache.json
+npm-debug.log*
+.DS_Store
